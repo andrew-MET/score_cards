@@ -1,0 +1,443 @@
+---
+title: "Signficance testing in harp"
+output: html_notebook
+---
+
+## Preamble
+
+In verification, the statisitical significance of scores and / or the difference between scores for different forecasts gives an indication of the robustness of those results. In harp, it is assumed that the statistical distribution of scores is unknown so bootstrappi is used. 
+
+## Bootstrapping
+Bootstrapping is a process by which statistics are calculated from samples of different draws from the same data - we will call these replicates. The statistics are calculated for each replicate and the variance between the replicates tells us something about how sure we can be about the statistic. 
+
+For forecast verification, this means calculated the scores for many replicates. We can then estimate the confidence intervals for the scores and / or the confidence of the differences between scores for different forecast models.
+
+## An example
+As an example, let's compare basic summary scores between AAEPS and IFSENS
+```{r, message=FALSE, warning=FALSE}
+library(harp)
+library(tidyverse)
+
+fcst <- read_point_forecast(
+  2018030800, 
+  2018033100,
+  c("ALERTNESS_ref", "IFSENS_Arctic"),
+  "EPS",
+  "T2m",
+  by            = "1d",
+  file_path     = "/home/andrewts/data/alertness/FCTABLE",
+  file_template = "fctable_eps"
+)
+
+obs <- read_point_obs(
+  first_validdate(fcst),
+  last_validdate(fcst),
+  "T2m",
+  obs_path = "/home/andrewts/data/alertness/OBSTABLE",
+  stations = pull_stations(fcst)
+)
+
+fcst <- common_cases(fcst)
+
+fcst <- join_to_fcst(
+  scale_point_forecast(fcst, -273.15, "degC"),
+  scale_point_obs(obs, T2m, -273.15, "degC")
+)
+
+fcst <- check_obs_against_fcst(fcst, T2m)
+
+verif <- ens_verify(fcst, T2m, verify_members = FALSE)
+```
+
+
+```{r, message=FALSE, warning=FALSE, fig.height=8 ,fig.width=9}
+library(patchwork)
+line_colours <- tribble(
+  ~mname, ~colour,
+  "ALERTNESS_ref", "#CC8888",
+  "IFSENS_Arctic", "#8888CC"
+)
+
+p1 <- plot_point_verif(
+  verif, spread_skill, plot_num_cases = FALSE, plot_caption = "",
+  colour_table = line_colours
+) +
+  guides(linetype = guide_legend(NULL, override.aes = list(colour = "#CCCCCC")))
+
+p2 <- plot_point_verif(
+  verif, mean_bias, plot_num_cases = FALSE, plot_caption = "",
+  colour_table = line_colours
+) 
+
+p3 <- plot_point_verif(
+  verif, crps, plot_num_cases = FALSE,
+  colour_table = line_colours
+) 
+
+p1 + p2 / p3 + plot_layout(guides = "collect") &
+  theme_harp_black(base_size = 10) &
+  theme(legend.position = "bottom")
+```
+### Bootstrap the verification with bootstrap_verify() 
+With the `bootstrap_verify()` function we can do a straightforward bootstrapping with e.g. 100 replicates. 
+```{r}
+bs_basic <- bootstrap_verify(fcst, ens_verify, T2m, n = 100, parallel = TRUE)
+```
+
+There isn't a built in function for plotting data from `bootstrap_verify()` yet, but this is a good opportunity to learn a little bit about _ggplot_, which powers the plotting functionality in harp. 
+
+First let's take a look at the data:
+```{r}
+bs_basic
+```
+
+The columns are briefly explained here:
+
+  - __fcst_model__ - The model whose score we are interested in
+  - __ref_model__ - When comparing models, this model is used as the reference
+  - __leadtime__ - The forecast lead time
+  - __score__ - the verificatino score
+  - __ref_score_\<stat\>__ - these are the bootstrap statistics for _ref_model_ - the mean, the median, and the upper and lower bounds of the confidence interval that are set in `bootstrap_verify()` (the default is 95%) 
+  - __fcst_score_\<stat\>__ - the same as _ref_score_\<stat\>_ except for _fcst_model_
+  - __difference_\<stat\>__ - The mean, medain and upper and lower confidence bounds for the score for _fcst_model_ - _ref_model_
+  - __percent_better__ - The percentage of _fcst_model_ that have a better score than _ref_model_. This can be thought of as the confidence of _fcst_model_ - _ref_model_
+
+So, now we know the data, let's try making some plots
+```{r, message=FALSE, warning=FALSE, fig.height=8 ,fig.width=9}
+plot_func <- function(x, plot_score, conf = c("ribbon", "errorbar"), alpha = 0.5) {
+  conf <- match.arg(conf)
+  p <- ggplot(
+    filter(x$ens_summary_scores, score %in% plot_score), 
+    aes(
+      x        = leadtime, 
+      y        = fcst_score_mean, 
+      ymin     = fcst_score_lower, 
+      ymax     = fcst_score_upper, 
+      colour   = fcst_model,
+      fill     = fcst_model,
+      linetype = score
+    )
+  ) + 
+    geom_line() +
+    scale_x_continuous(breaks = seq(0, 48, 6)) +
+    labs(
+      x = "Lead Time [h]", 
+      y = paste(harpVis:::totitle(gsub("_", " ", plot_score)), collapse = "; "),
+      colour = NULL, 
+      linetype = NULL,
+      title = paste0(
+        paste(harpVis:::totitle(gsub("_", " ", plot_score)), collapse = "; "), 
+        " : ",
+        harpVis:::date_to_char(attr(x, "start_date")), 
+        " - ",
+        harpVis:::date_to_char(attr(x, "end_date"))
+      ),
+      subtitle = paste(attr(x, "num_stations"), "Stations")
+    ) +
+    scale_colour_manual(values = c(ALERTNESS_ref = "#CC8888", IFSENS_Arctic = "#8888CC"))
+  
+  if (length(plot_score) < 2) {
+    p <- p + 
+      guides(linetype = "none") 
+  }
+  
+  if (conf == "errorbar") {
+    p <- p + geom_errorbar()
+  }
+  
+  if (conf == "ribbon") {
+    p <- p + geom_ribbon(alpha = alpha) + guides(fill = "none")
+  }
+  
+  p + theme(legend.position = "bottom")
+}
+
+p1 <- plot_func(bs_basic, c("spread", "rmse"), "errorbar") +
+  guides(linetype = guide_legend(NULL, override.aes = list(colour = "#CCCCCC")))
+
+p2 <- plot_func(bs_basic, "mean_bias", "errorbar")
+
+p3 <- plot_func(bs_basic, "crps", "errorbar")
+
+p1 + p2 / p3 + plot_layout(guides = "collect") &
+  theme_harp_black(base_size = 9) &
+  theme(legend.position = "bottom")
+```
+
+```{r, message=FALSE, warning=FALSE, fig.height=8 ,fig.width=9}
+p1 <- plot_func(bs_basic, c("spread", "rmse"), "ribbon") +
+  guides(linetype = guide_legend(NULL, override.aes = list(colour = "#CCCCCC")))
+
+p2 <- plot_func(bs_basic, "mean_bias", "ribbon")
+
+p3 <- plot_func(bs_basic, "crps", "ribbon")
+
+p1 + p2 / p3 + plot_layout(guides = "collect") &
+  theme_harp_black(base_size = 9) &
+  theme(legend.position = "bottom")
+```
+
+Or we can plot the difference between the two showing both the confidence interval of the difference and whether that difference is significant or not at the 95% level. 
+
+```{r, message=FALSE, warning=FALSE, fig.height=8 ,fig.width=9}
+diff_plot <- function(
+  x, plot_score, fcst_model, ref_model, significance = 0.95, 
+  conf = c("ribbon", "errorbar"), alpha = 0.5
+) {
+  
+  conf <- match.arg(conf)
+
+  sig_text <- c(
+    paste0(
+      fcst_model, " better than ", ref_model, 
+      " with ", significance * 100, "% confidence"
+    ),
+    paste0(
+      fcst_model, " worse than ", ref_model,
+      " with ", significance * 100, "% confidence"
+    ),
+    paste0(
+      "No difference between ", fcst_model, " and ", ref_model, 
+      " with ", significance * 100, "% confidence"
+    )
+  )
+  
+  shapes <- c(24, 25, 1)
+  names(shapes) <- sig_text
+  
+  colours <- c("#8888CC", "#CC8888", "#ACACAC")
+  names(colours) <- sig_text
+  
+  plot_data <- filter(
+    x$ens_summary_scores,
+    score %in% plot_score,
+    fcst_model == .env$fcst_model,
+    ref_model == .env$ref_model
+  ) %>% 
+    mutate(
+      sig = case_when(
+        percent_better >= significance       ~ sig_text[1],
+        percent_better <= (1 - significance) ~ sig_text[2],
+        TRUE                                 ~ sig_text[3]
+      )
+    )
+  
+    p <- ggplot(
+    plot_data, 
+    aes(
+      x        = leadtime, 
+      y        = difference_mean, 
+      ymin     = difference_lower, 
+      ymax     = difference_upper, 
+      linetype = score
+    )
+  ) + 
+    labs(
+      x = "Lead Time [h]", 
+      y = paste(harpVis:::totitle(gsub("_", " ", plot_score)), collapse = "; "),
+      colour = NULL, 
+      linetype = NULL,
+      shape = NULL,
+      title = paste0(
+        paste(harpVis:::totitle(gsub("_", " ", plot_score)), collapse = "; "), 
+        " : ",
+        harpVis:::date_to_char(attr(x, "start_date")), 
+        " - ",
+        harpVis:::date_to_char(attr(x, "end_date"))
+      ),
+      subtitle = paste(
+        fcst_model, "-", ref_model, "at",
+        attr(x, "num_stations"), "Stations"
+      )
+    ) 
+    
+  if (length(plot_score) < 2) {
+    p <- p + 
+      guides(linetype = "none") 
+  }
+  
+  if (conf == "errorbar") {
+    p <- p + geom_errorbar(colour = "#CC8888")
+  }
+  
+  if (conf == "ribbon") {
+    p <- p + geom_ribbon(alpha = alpha, fill = "#CC8888")
+  }
+
+  p +
+    geom_line(colour = "#CC8888") +
+    geom_point(aes(shape = sig, colour = sig, fill = sig)) +
+    scale_colour_manual(values = colours) +
+    scale_fill_manual(values = colours) +
+    scale_shape_manual(values = shapes) +
+    scale_x_continuous(breaks = seq(0, 48, 6)) +
+    guides(
+      colour = guide_legend(nrow = 3),
+      fill = guide_legend(NULL, nrow = 3),
+      shape = guide_legend(nrow = 3)
+    ) +
+    theme(legend.position = "bottom")
+}
+
+fm <- "ALERTNESS_ref"
+ref <- "IFSENS_Arctic"
+
+p1 <- diff_plot(bs_basic, c("spread", "rmse"), fm, ref, 0.95, "ribbon") +
+  guides(linetype = guide_legend(NULL, override.aes = list(colour = "#CCCCCC"))) 
+
+p2 <- diff_plot(bs_basic, "mean_bias", fm, ref, 0.95, "ribbon") +
+  guides(colour = "none", fill = "none", shape = "none")
+
+p3 <- diff_plot(bs_basic, "crps", fm, ref, 0.95, "ribbon") +
+  guides(colour = "none", fill = "none", shape = "none")
+
+p1 + p2 / p3 + plot_layout(guides = "collect") &
+  theme_harp_black(base_size = 9) &
+  theme(legend.position = "bottom")
+```
+
+## Serial correlations
+
+In bootstrapping a problem arises if the data are in some way serially correlated - whether that be in time or space. In order to get a representative statistic for each bootstrap replicate we need to ensure that those serial correlations are maintained for each replicate. However, how much we need to do that is something of a judgement call. 
+
+### Spatial autocorrelations
+The computation and interpretation of spatial autocorrelations is quite complicated, so it won't be covered here (but e.g. see [moran.test from the spdep package](https://www.rdocumentation.org/packages/spdep/versions/1.1-7/topics/moran.test)). However, we can ignore the impact of those spatial autocorrelations altogether by making sure that every station is represented in each bootstrap replicate. This can be done by pooling the data so that the block bootstrap can be used whereby blocks of data are drawn with replacement from the dataset. To ensure that all stations are included in each bootstrap replicate we can pool the data by forecast date such that each block contains all stations. This is done with the `pool_by` argument in `bootstrap_verify()` where unique values in the column named in `pool_by` are used to group the data together.
+
+```{r}
+bs_block <- bootstrap_verify(
+  fcst, ens_verify, T2m, 100, pool_by = "fcdate", parallel = TRUE
+)
+```
+
+We can then see how this compares with the conclusions that might have been drawn from our previous analysis
+```{r, fig.width=9, fig.height=10, message=FALSE, warning=FALSE}
+p1 <- diff_plot(bs_basic, c("spread", "rmse"), "ALERTNESS_ref", "IFSENS_Arctic") +
+  guides(linetype = guide_legend(NULL, override.aes = list(colour = "#CCCCCC")))
+p2 <- diff_plot(bs_block, c("spread", "rmse"), "ALERTNESS_ref", "IFSENS_Arctic") +
+  guides(colour = "none", fill = "none", shape = "none", linetype = "none")
+p3 <- diff_plot(bs_basic, "mean_bias", "ALERTNESS_ref", "IFSENS_Arctic") +
+  guides(colour = "none", fill = "none", shape = "none")
+p4 <- diff_plot(bs_block, "mean_bias", "ALERTNESS_ref", "IFSENS_Arctic") +
+  guides(colour = "none", fill = "none", shape = "none")
+p5 <- diff_plot(bs_basic, "crps", "ALERTNESS_ref", "IFSENS_Arctic") +
+  guides(colour = "none", fill = "none", shape = "none") +
+  labs(caption = "Basic bootstrap")
+p6 <- diff_plot(bs_block, "crps", "ALERTNESS_ref", "IFSENS_Arctic") +
+  guides(colour = "none", fill = "none", shape = "none") +
+  labs(caption = "Block bootstrap pooled by fcdate")
+
+(p1 + p2) / (p3 + p4) / (p5 + p6) + plot_layout(guides = "collect") &
+  theme_harp_black(base_size = 9) &
+  theme(legend.position = "bottom", plot.caption = element_text(hjust = 0, size = 9))
+```
+
+It is clear that with the block bootstrap (right-hand column) that there is actually more variability in the difference between scores and some of the symbols that indicated significance with 95% confidence now do not.
+
+### Temporal autocorrelations
+Let's look at how the errors are correlated in time. We can do this by grouping the verification by lead time and forecast date and then calculating the autocorrelations as a function of the forecast date. 
+
+```{r, message=FALSE, warning=FALSE}
+verif_time <- ens_verify(
+  fcst, T2m, groupings = c("leadtime", "fcdate"), verify_members = FALSE
+)
+```
+
+R's `acf()` function returns a list, but we just want to get the lag and the autocorrelation values from it so we make a function to extract those variables into a data frame.
+```{r}
+acf_to_df <- function(x) {
+  ac <- acf(x, plot = FALSE)
+  data.frame(lag = as.vector(ac$lag), autocorrelation = as.vector(ac$acf))
+}
+```
+
+We can then use dplyr's `summarise()` function to compute the autocorrelations for each lead time and forecast model. We need to make sure that the data are arranged in order of fcdate to have the correct lags.
+
+```{r, message=FALSE, warning=FALSE}
+autocorr <- group_by(verif_time$ens_summary_scores, mname, leadtime) %>% 
+  arrange(fcdate) %>% 
+  summarise(ac = list(acf_to_df(mean_bias))) %>% 
+  unnest(ac)
+```
+
+And then we can plot the autocorrelations
+```{r, fig.height=9, fig.width=8, fig.align="center"}
+ggplot(autocorr, aes(lag, autocorrelation, fill = mname)) +
+  geom_col(position = "dodge") +
+  facet_wrap(vars(
+    paste0("LT = ", fct_inorder(formatC(leadtime, width = 2, flag = "0")), "h")
+  )) +
+  scale_fill_manual(values = c(ALERTNESS_ref = "#CC8888", IFSENS_Arctic = "#8888CC")) +
+  theme_harp_black() +
+  labs(x = "Lag (days)", y = "Autocorrelation", fill = NULL) +
+  theme(
+    strip.text = element_text(colour = "#CCCCCC"), 
+    legend.position = "bottom"
+  )
+```
+
+So, it looks like serial correlations exist for up to 4 days. We can use the information to create pools of 4 consecutive days for the block bootstrap. This is a two stage process - first we need to define the pools using `make_bootstrap_pools()`. We can then pass the output of this to the `pool_by` argument in `bootstrap_verify()`
+
+```{r}
+bs_pools_4d <- make_bootstrap_pools(fcst, fcdate, "4d")
+bs_block_4d <- bootstrap_verify(
+  fcst, ens_verify, T2m, 100, pool_by = bs_pools_4d, parallel = TRUE
+)
+```
+
+Now we can compare the results with those from pooling the data by fcdate only
+```{r, fig.width=9, fig.height=10, message=FALSE, warning=FALSE}
+p1 <- diff_plot(bs_block, c("spread", "rmse"), "ALERTNESS_ref", "IFSENS_Arctic") +
+  guides(linetype = guide_legend(NULL, override.aes = list(colour = "#CCCCCC")))
+p2 <- diff_plot(bs_block_4d, c("spread", "rmse"), "ALERTNESS_ref", "IFSENS_Arctic") +
+  guides(colour = "none", fill = "none", shape = "none", linetype = "none")
+p3 <- diff_plot(bs_block, "mean_bias", "ALERTNESS_ref", "IFSENS_Arctic") +
+  guides(colour = "none", fill = "none", shape = "none")
+p4 <- diff_plot(bs_block_4d, "mean_bias", "ALERTNESS_ref", "IFSENS_Arctic") +
+  guides(colour = "none", fill = "none", shape = "none")
+p5 <- diff_plot(bs_block, "crps", "ALERTNESS_ref", "IFSENS_Arctic") +
+  guides(colour = "none", fill = "none", shape = "none") +
+  labs(caption = "Block bootstrap pooled by fcdate")
+p6 <- diff_plot(bs_block_4d, "crps", "ALERTNESS_ref", "IFSENS_Arctic") +
+  guides(colour = "none", fill = "none", shape = "none") +
+  labs(caption = "Block bootstrap pooled by 4-day fcdate pools")
+
+(p1 + p2) / (p3 + p4) / (p5 + p6) + plot_layout(guides = "collect") &
+  theme_harp_black(base_size = 9) &
+  theme(legend.position = "bottom", plot.caption = element_text(hjust = 0, size = 9))
+
+```
+
+This does not have such a large impact, but there are still some symbols that change. However, discrete pools were defined. We can also define overlapping pools using `overlap = TRUE` in `make_bootstrap_pools()`
+
+```{r}
+bs_pools_4d_ol <- make_bootstrap_pools(fcst, fcdate, "4d", overlap = TRUE)
+bs_block_4d_ol <- bootstrap_verify(
+  fcst, ens_verify, T2m, 100, pool_by = bs_pools_4d, parallel = TRUE
+)
+```
+
+... and compare the results
+```{r, fig.width=9, fig.height=10, message=FALSE, warning=FALSE}
+p1 <- diff_plot(bs_block_4d, c("spread", "rmse"), "ALERTNESS_ref", "IFSENS_Arctic") +
+  guides(linetype = guide_legend(NULL, override.aes = list(colour = "#CCCCCC")))
+p2 <- diff_plot(bs_block_4d_ol, c("spread", "rmse"), "ALERTNESS_ref", "IFSENS_Arctic") +
+  guides(colour = "none", fill = "none", shape = "none", linetype = "none")
+p3 <- diff_plot(bs_block_4d, "mean_bias", "ALERTNESS_ref", "IFSENS_Arctic") +
+  guides(colour = "none", fill = "none", shape = "none")
+p4 <- diff_plot(bs_block_4d_ol, "mean_bias", "ALERTNESS_ref", "IFSENS_Arctic") +
+  guides(colour = "none", fill = "none", shape = "none")
+p5 <- diff_plot(bs_block_4d, "crps", "ALERTNESS_ref", "IFSENS_Arctic") +
+  guides(colour = "none", fill = "none", shape = "none") +
+  labs(caption = "Block bootstrap pooled by 4-day fcdate pools")
+p6 <- diff_plot(bs_block_4d_ol, "crps", "ALERTNESS_ref", "IFSENS_Arctic") +
+  guides(colour = "none", fill = "none", shape = "none") +
+  labs(caption = "Block bootstrap pooled by 4-day overlapping fcdate pools")
+
+(p1 + p2) / (p3 + p4) / (p5 + p6) + plot_layout(guides = "collect") &
+  theme_harp_black(base_size = 9) &
+  theme(legend.position = "bottom", plot.caption = element_text(hjust = 0, size = 9))
+
+```
+
+Once again we see a small increase in the uncertainty, and a couple of changes in symbol. 
+
