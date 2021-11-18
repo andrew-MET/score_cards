@@ -14,9 +14,10 @@ For forecast verification, this means calculated the scores for many replicates.
 
 ## An example
 As an example, let's compare basic summary scores between AAEPS and IFSENS
-```{r, message=FALSE, warning=FALSE}
+```{r, message=FALSE, warning=FALSE, results="hide"}
 library(harp)
 library(tidyverse)
+library(here)
 
 fcst <- read_point_forecast(
   2018030800, 
@@ -25,7 +26,7 @@ fcst <- read_point_forecast(
   "EPS",
   "T2m",
   by            = "1d",
-  file_path     = "/home/andrewts/data/alertness/FCTABLE",
+  file_path     = here("data", "FCTABLE"),
   file_template = "fctable_eps"
 )
 
@@ -33,7 +34,7 @@ obs <- read_point_obs(
   first_validdate(fcst),
   last_validdate(fcst),
   "T2m",
-  obs_path = "/home/andrewts/data/alertness/OBSTABLE",
+  obs_path = here("data", "OBSTABLE"),
   stations = pull_stations(fcst)
 )
 
@@ -80,7 +81,7 @@ p1 + p2 / p3 + plot_layout(guides = "collect") &
 ```
 ### Bootstrap the verification with bootstrap_verify() 
 With the `bootstrap_verify()` function we can do a straightforward bootstrapping with e.g. 100 replicates. 
-```{r}
+```{r, results="hide"}
 bs_basic <- bootstrap_verify(fcst, ens_verify, T2m, n = 100, parallel = TRUE)
 ```
 
@@ -303,7 +304,7 @@ In bootstrapping a problem arises if the data are in some way serially correlate
 ### Spatial autocorrelations
 The computation and interpretation of spatial autocorrelations is quite complicated, so it won't be covered here (but e.g. see [moran.test from the spdep package](https://www.rdocumentation.org/packages/spdep/versions/1.1-7/topics/moran.test)). However, we can ignore the impact of those spatial autocorrelations altogether by making sure that every station is represented in each bootstrap replicate. This can be done by pooling the data so that the block bootstrap can be used whereby blocks of data are drawn with replacement from the dataset. To ensure that all stations are included in each bootstrap replicate we can pool the data by forecast date such that each block contains all stations. This is done with the `pool_by` argument in `bootstrap_verify()` where unique values in the column named in `pool_by` are used to group the data together.
 
-```{r}
+```{r, results="hide"}
 bs_block <- bootstrap_verify(
   fcst, ens_verify, T2m, 100, pool_by = "fcdate", parallel = TRUE
 )
@@ -336,7 +337,7 @@ It is clear that with the block bootstrap (right-hand column) that there is actu
 ### Temporal autocorrelations
 Let's look at how the errors are correlated in time. We can do this by grouping the verification by lead time and forecast date and then calculating the autocorrelations as a function of the forecast date. 
 
-```{r, message=FALSE, warning=FALSE}
+```{r, message=FALSE, warning=FALSE, results="hide"}
 verif_time <- ens_verify(
   fcst, T2m, groupings = c("leadtime", "fcdate"), verify_members = FALSE
 )
@@ -352,7 +353,7 @@ acf_to_df <- function(x) {
 
 We can then use dplyr's `summarise()` function to compute the autocorrelations for each lead time and forecast model. We need to make sure that the data are arranged in order of fcdate to have the correct lags.
 
-```{r, message=FALSE, warning=FALSE}
+```{r, message=FALSE, warning=FALSE, results="hide"}
 autocorr <- group_by(verif_time$ens_summary_scores, mname, leadtime) %>% 
   arrange(fcdate) %>% 
   summarise(ac = list(acf_to_df(mean_bias))) %>% 
@@ -377,7 +378,7 @@ ggplot(autocorr, aes(lag, autocorrelation, fill = mname)) +
 
 So, it looks like serial correlations exist for up to 4 days. We can use the information to create pools of 4 consecutive days for the block bootstrap. This is a two stage process - first we need to define the pools using `make_bootstrap_pools()`. We can then pass the output of this to the `pool_by` argument in `bootstrap_verify()`
 
-```{r}
+```{r, results="hide"}
 bs_pools_4d <- make_bootstrap_pools(fcst, fcdate, "4d")
 bs_block_4d <- bootstrap_verify(
   fcst, ens_verify, T2m, 100, pool_by = bs_pools_4d, parallel = TRUE
@@ -409,7 +410,7 @@ p6 <- diff_plot(bs_block_4d, "crps", "ALERTNESS_ref", "IFSENS_Arctic") +
 
 This does not have such a large impact, but there are still some symbols that change. However, discrete pools were defined. We can also define overlapping pools using `overlap = TRUE` in `make_bootstrap_pools()`
 
-```{r}
+```{r, results="hide"}
 bs_pools_4d_ol <- make_bootstrap_pools(fcst, fcdate, "4d", overlap = TRUE)
 bs_block_4d_ol <- bootstrap_verify(
   fcst, ens_verify, T2m, 100, pool_by = bs_pools_4d, parallel = TRUE
